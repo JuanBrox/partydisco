@@ -1,7 +1,8 @@
-"""Capa de datos sobre Supabase (Streamlit Cloud no conserva ficheros locales)."""
+"""Capa de datos sobre Supabase usando su API REST directamente (sin la librería supabase)."""
+import datetime
+
 import httpx
 import streamlit as st
-from supabase import create_client
 
 
 def _datos():
@@ -17,65 +18,52 @@ def _datos():
     return url, key
 
 
-@st.cache_resource
-def _client():
+def _req(method, table, params=None, json=None, prefer=None):
     url, key = _datos()
-    return create_client(url, key)
-
-
-def _diagnostico(table, err):
-    """Pregunta a Supabase directamente y muestra su respuesta real."""
-    url, key = _datos()
+    headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    if prefer:
+        headers["Prefer"] = prefer
     try:
-        r = httpx.get(f"{url}/rest/v1/{table}?select=*&limit=1",
-                      headers={"apikey": key, "Authorization": f"Bearer {key}"}, timeout=15)
-        detalle = f"HTTP {r.status_code}: {r.text[:400]}"
+        r = httpx.request(method, f"{url}/rest/v1/{table}", params=params, json=json,
+                          headers=headers, timeout=20)
     except Exception as e:  # noqa: BLE001
-        detalle = f"No se pudo conectar: {e}"
-    st.error(f"Error consultando la tabla '{table}'.\n\n**Respuesta de Supabase:** {detalle}\n\n"
-             f"(Clave: empieza por '{key[:8]}…', {len(key)} caracteres)")
-    st.stop()
+        st.error(f"No se pudo conectar con Supabase: {e}")
+        st.stop()
+    if r.status_code >= 300:
+        st.error(f"Supabase respondió HTTP {r.status_code} en '{table}': {r.text[:400]}")
+        st.stop()
+    return r.json() if r.text else []
 
 
 def select(table, order=None, desc=False, **eq):
-    try:
-        q = _client().table(table).select("*")
-        for k, v in eq.items():
-            q = q.eq(k, v)
-        if order:
-            q = q.order(order, desc=desc)
-        data = q.execute().data
-    except Exception as e:  # noqa: BLE001
-        _diagnostico(table, e)
-    if not isinstance(data, list):
-        st.error(f"Supabase devolvió algo inesperado en '{table}': {str(data)[:300]}")
-        st.stop()
-    return data
+    params = {"select": "*"}
+    for k, v in eq.items():
+        params[k] = f"eq.{v}"
+    if order:
+        params["order"] = f"{order}.{'desc' if desc else 'asc'}"
+    return _req("GET", table, params)
 
 
 def get(table, id_):
-    r = _client().table(table).select("*").eq("id", id_).limit(1).execute().data
+    r = _req("GET", table, {"select": "*", "id": f"eq.{id_}", "limit": 1})
     return r[0] if r else None
 
 
 def insert(table, row):
-    return _client().table(table).insert(row).execute().data[0]
+    return _req("POST", table, json=row, prefer="return=representation")[0]
 
 
 def update(table, id_, row):
-    _client().table(table).update(row).eq("id", id_).execute()
+    _req("PATCH", table, {"id": f"eq.{id_}"}, json=row)
 
 
 def delete(table, id_):
-    _client().table(table).delete().eq("id", id_).execute()
+    _req("DELETE", table, {"id": f"eq.{id_}"})
 
 
 def siguiente_numero(table, prefijo):
     """Devuelve p. ej. PRE-2026-004 según los ya existentes del año."""
-    año = __import__("datetime").date.today().year
-    base = f"{prefijo}-{año}-"
-    filas = (
-        _client().table(table).select("numero").like("numero", base + "%").execute().data
-    )
+    base = f"{prefijo}-{datetime.date.today().year}-"
+    filas = _req("GET", table, {"select": "numero", "numero": f"like.{base}*"})
     n = max([int(f["numero"].split("-")[-1]) for f in filas] + [0]) + 1
     return f"{base}{n:03d}"
