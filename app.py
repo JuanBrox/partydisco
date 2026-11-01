@@ -1,18 +1,19 @@
 import calendar
 import urllib.parse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from html import escape
 
 import pandas as pd
 import streamlit as st
 
 import db
+import guion_texto
 import pdfs
 
 st.set_page_config(page_title="Party Management", page_icon="🎧", layout="wide")
 
 EMPRESA = {"nombre": "PartyDisco", "lema": "Musical Emotions", "nif": "", "direccion": "",
-           "telefono": "", "email": "", "iban": "", **dict(st.secrets.get("empresa", {}))}
+           "telefono": "", "email": "", "iban": "", "razon_social": "", **dict(st.secrets.get("empresa", {}))}
 
 ESTADOS_EVENTO = ["Consulta", "Presupuestado", "Confirmado", "Realizado", "Cancelado"]
 ESTADOS_PRESU = ["Borrador", "Enviado", "Aceptado", "Rechazado"]
@@ -59,6 +60,16 @@ PLANTILLAS = {
         ("17:30", "Discomóvil infantil y familiar", "Juegos y baile", "Estilos:"),
         ("20:00", "Fin de fiesta", "", ""),
     ],
+    "Empresa": [
+        ("19:00", "Hora de inicio", "Apertura del evento. Comprobación final de sonido y micrófonos", ""),
+        ("19:15", "Llegada de invitados", "Música ambiente de bienvenida", "Estilo / playlist:"),
+        ("19:45", "Welcome drink / cocktail", "Hilo musical de fondo", "Estilo / playlist:"),
+        ("21:00", "Cena", "Música de fondo a bajo volumen", ""),
+        ("22:00", "Discursos", "Micrófonos inalámbricos para las intervenciones", "Orden de intervenciones:"),
+        ("22:30", "Vídeo / presentación / entrega de premios", "Proyección, entrega de galardones y micrófono", "Música de vídeo / entrega:"),
+        ("23:00", "Lista de canciones", "Sesión musical según la lista acordada con el cliente", "Canciones, estilos y lista de no-poner:"),
+        ("01:00", "Hora de cierre", "Última canción y fin del evento", ""),
+    ],
 }
 
 
@@ -68,10 +79,14 @@ def login():
     if not pw or st.session_state.get("ok"):
         return
     st.title("🎧 Party Management")
-    entrada = st.text_input("Contraseña", type="password")
-    if st.button("Entrar") and entrada == pw:
-        st.session_state["ok"] = True
-        st.rerun()
+    with st.form("login"):
+        entrada = st.text_input("Contraseña", type="password")
+        enviar = st.form_submit_button("Entrar")
+    if enviar:
+        if entrada == pw:
+            st.session_state["ok"] = True
+            st.rerun()
+        st.error("Contraseña incorrecta")
     st.stop()
 
 
@@ -186,7 +201,7 @@ def pag_panel():
     consultas = [e for e in evs if e["estado"] == "Consulta"]
     presu_env = [p for p in db.select("presupuestos") if p["estado"] == "Enviado"]
     pend = [f for f in db.select("facturas") if f["estado"] == "Pendiente"]
-    imp_pend = sum(pdfs.totales(f["lineas"], f["descuento"], f["iva"])["total"] for f in pend)
+    imp_pend = sum(pdfs.totales(f["lineas"], f["descuento"], f["iva"], f.get("retencion") or 0)["total"] for f in pend)
     a, b, c, d = st.columns(4)
     a.metric("Eventos próx. 30 días", len(proximos))
     b.metric("Consultas sin presupuesto", len(consultas))
@@ -198,7 +213,7 @@ def pag_panel():
     if futuros:
         st.dataframe(pd.DataFrame([{
             "Fecha": fmt_fecha(e["fecha"]), "Evento": e["titulo"], "Cliente": cl.get(e["cliente_id"], {}).get("nombre", ""),
-            "Lugar": e["lugar"], "Estado": e["estado"]} for e in futuros]), hide_index=True, use_container_width=True)
+            "Lugar": e["lugar"], "Estado": e["estado"]} for e in futuros]), hide_index=True, width="stretch")
     else:
         st.caption("No hay eventos próximos.")
 
@@ -241,7 +256,7 @@ def pag_clientes():
     cs = [c for c in db.select("clientes", order="nombre")
           if buscar.lower() in (c["nombre"] + (c["telefono"] or "") + (c["email"] or "")).lower()]
     if cs:
-        st.dataframe(pd.DataFrame(cs)[["nombre", "telefono", "email", "nif"]], hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(cs)[["nombre", "telefono", "email", "nif"]], hide_index=True, width="stretch")
     sel = st.selectbox("Editar cliente", [None] + [c["id"] for c in cs],
                        format_func=lambda i: "➕ Nuevo cliente" if i is None else next(c["nombre"] for c in cs if c["id"] == i))
     c = next((x for x in cs if x["id"] == sel), {})
@@ -271,7 +286,7 @@ def pag_eventos():
     if evs:
         st.dataframe(pd.DataFrame([{"Fecha": fmt_fecha(e["fecha"]), "Evento": e["titulo"], "Tipo": e["tipo"],
                                     "Cliente": cl.get(e["cliente_id"], {}).get("nombre", ""), "Lugar": e["lugar"],
-                                    "Estado": e["estado"]} for e in evs]), hide_index=True, use_container_width=True)
+                                    "Estado": e["estado"]} for e in evs]), hide_index=True, width="stretch")
     sel = st.selectbox("Editar evento", [None] + [e["id"] for e in evs],
                        format_func=lambda i: "➕ Nuevo evento" if i is None else
                        next(f"{fmt_fecha(e['fecha'])} · {e['titulo']}" for e in evs if e["id"] == i))
@@ -286,7 +301,7 @@ def pag_servicios():
     seed_servicios()
     ss = db.select("servicios", order="nombre")
     df = st.data_editor(pd.DataFrame(ss)[["id", "nombre", "descripcion", "precio"]], hide_index=True,
-                        disabled=["id"], use_container_width=True, key="ed_serv",
+                        disabled=["id"], width="stretch", key="ed_serv",
                         column_config={"precio": st.column_config.NumberColumn("Precio €", format="%.2f")})
     if st.button("Guardar cambios", type="primary"):
         for r in df.to_dict("records"):
@@ -322,7 +337,7 @@ def pag_presupuestos():
                     "cantidad": 1.0, "precio": float(cat[n]["precio"] or 0)}
                    for n in (ev.get("servicios") or []) if n in cat]
             st.caption("Edita las líneas libremente (puedes añadir filas). Servicios del evento precargados.")
-            df = st.data_editor(lineas_df(ini), num_rows="dynamic", use_container_width=True, key=f"lin_{eid}",
+            df = st.data_editor(lineas_df(ini), num_rows="dynamic", width="stretch", key=f"lin_{eid}",
                                 column_config={"precio": st.column_config.NumberColumn("Precio €", format="%.2f"),
                                                "cantidad": st.column_config.NumberColumn("Cant.", min_value=0)})
             a, b, c = st.columns(3)
@@ -365,21 +380,8 @@ def pag_presupuestos():
                 if cli.get("email"):
                     z.link_button("✉️ Email", f"mailto:{cli['email']}?subject={urllib.parse.quote('Presupuesto ' + p['numero'])}"
                                               f"&body={urllib.parse.quote(msg)}")
-                st.divider()
-                pct = st.slider("Facturar % del presupuesto", 10, 100, 100, 10, key=f"pct_{p['id']}")
-                if st.button("🧾 Crear factura", key=f"fac_{p['id']}"):
-                    if pct == 100:
-                        lin, des = p["lineas"], p["descuento"]
-                    else:
-                        base = pdfs.totales(p["lineas"], p["descuento"], 0)["imponible"] * pct / 100
-                        lin = [{"concepto": f"{pct}% del presupuesto {p['numero']} ({ev.get('titulo', '')})",
-                                "cantidad": 1, "precio": round(base, 2)}]
-                        des = 0
-                    num = db.siguiente_numero("facturas", "FAC")
-                    db.insert("facturas", {"numero": num, "presupuesto_id": p["id"], "evento_id": p["evento_id"],
-                                           "cliente_id": p["cliente_id"], "lineas": lin, "descuento": des, "iva": p["iva"],
-                                           "vencimiento": (date.today() + timedelta(days=15)).isoformat()})
-                    st.success(f"Factura {num} creada en Facturación")
+                if p["estado"] == "Aceptado":
+                    st.caption("Cuando el evento se realice, factúralo desde la sección Facturación.")
                 if st.button("🗑️ Eliminar presupuesto", key=f"del_{p['id']}"):
                     db.delete("presupuestos", p["id"])
                     st.rerun()
@@ -393,65 +395,338 @@ def pag_guiones():
         return
     eid = st.selectbox("Evento", list(evs), format_func=lambda i: f"{fmt_fecha(evs[i]['fecha'])} · {evs[i]['titulo']}")
     ev = evs[eid]
-    key = f"guion_{eid}"
+    key, vkey = f"guion_{eid}", f"ver_{eid}"
     if key not in st.session_state:
         st.session_state[key] = ev.get("guion") or []
-    st.caption("Cargar plantilla (sustituye el guion actual):")
+    st.session_state.setdefault(vkey, 0)
+    if st.session_state.get("guion_msg"):
+        st.success(st.session_state.pop("guion_msg"))
+
+    with st.expander("📥 Cargar el guion desde un texto", expanded=not st.session_state[key]):
+        st.caption("Pega todas las indicaciones del cliente (horas, momentos, canciones, normas…) o sube un .txt. "
+                   "Las líneas que empiezan por una hora (18:00, 21h, 00:00 a 03:00) se convierten en momentos; "
+                   "lo demás se añade como detalle o como indicaciones generales.")
+        archivo = st.file_uploader("Fichero de texto (.txt o .md)", type=["txt", "md"], key=f"up_{eid}")
+        texto = st.text_area("Texto con las indicaciones", height=220, key=f"txt_{eid}",
+                             placeholder="Indicaciones: no poner reggaeton\n18:00 Llegada de invitados - música ambiente\n"
+                                         "18:30 Ceremonia: entrada de novios. Música: Perfect\n00:00 Discomóvil. Estilos: pop, latino, 80s")
+        if archivo and not texto.strip():
+            raw = archivo.getvalue()
+            try:
+                texto = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                texto = raw.decode("latin-1")
+        c1, c2 = st.columns(2)
+        hay_ia = bool(st.secrets.get("ANTHROPIC_API_KEY"))
+        modo = c1.radio("Cómo organizarlo", ["Reglas automáticas"] + (["IA (Claude)"] if hay_ia else []),
+                        horizontal=True, key=f"modo_{eid}",
+                        help="La IA entiende textos desordenados. Se activa añadiendo ANTHROPIC_API_KEY en los Secrets.")
+        accion = c2.radio("Si ya hay un guion", ["Reemplazarlo", "Añadir al final"], horizontal=True, key=f"acc_{eid}")
+        if st.button("✨ Organizar texto", type="primary", disabled=not texto.strip(), key=f"org_{eid}"):
+            try:
+                if modo.startswith("IA"):
+                    with st.spinner("Organizando con IA…"):
+                        nuevos = guion_texto.organizar_ia(texto, st.secrets["ANTHROPIC_API_KEY"],
+                                                          st.secrets.get("ANTHROPIC_MODEL", "claude-sonnet-5-5"))
+                else:
+                    nuevos = guion_texto.parse_texto(texto)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"No se pudo organizar el texto: {e}")
+                nuevos = []
+            if nuevos:
+                st.session_state[key] = (st.session_state[key] + nuevos) if accion.startswith("Añadir") else nuevos
+                st.session_state[vkey] += 1
+                st.session_state["guion_msg"] = f"{len(nuevos)} bloques cargados. Revisa la tabla, corrige lo que haga falta y pulsa Guardar."
+                st.rerun()
+            elif not modo.startswith("IA"):
+                st.warning("No he encontrado horas en el texto. Empieza cada línea con la hora (por ejemplo «18:00 Ceremonia») o usa la IA.")
+
+    st.caption("O carga una plantilla (sustituye el guion actual):")
     cols = st.columns(len(PLANTILLAS))
     for col, (nombre, filas) in zip(cols, PLANTILLAS.items()):
         if col.button(nombre, key=f"pl_{nombre}_{eid}"):
             st.session_state[key] = [dict(zip(("hora", "momento", "detalle", "musica"), f)) for f in filas]
-            st.session_state.pop(f"ed_{eid}", None)
+            st.session_state[vkey] += 1
             st.rerun()
-    base = pd.DataFrame(st.session_state[key], columns=["hora", "momento", "detalle", "musica"]).fillna("")
-    df = st.data_editor(base, num_rows="dynamic", use_container_width=True, key=f"ed_{eid}_{len(base)}",
-                        column_config={"hora": "Hora", "momento": "Momento", "detalle": "Detalle", "musica": "Música / notas"})
-    items = [r for r in df.fillna("").to_dict("records") if str(r["momento"]).strip() or str(r["hora"]).strip()]
+    base = pd.DataFrame(st.session_state[key], columns=["hora", "momento", "detalle", "musica"]).fillna("").astype(str)
+    df = st.data_editor(base, num_rows="dynamic", width="stretch", key=f"ed_{eid}_{st.session_state[vkey]}",
+                        column_config={"hora": st.column_config.TextColumn("Hora", default="", width="small"),
+                                       "momento": st.column_config.TextColumn("Momento", default=""),
+                                       "detalle": st.column_config.TextColumn("Detalle", default="", width="large"),
+                                       "musica": st.column_config.TextColumn("Música / notas", default="", width="medium")})
+    items = [r for r in df.fillna("").to_dict("records") if str(r["momento"]).strip() or str(r["hora"]).strip() or str(r["detalle"]).strip()]
     a, b, c = st.columns(3)
     if a.button("💾 Guardar guion", type="primary"):
         db.update("eventos", eid, {"guion": items})
         st.session_state[key] = items
         st.success("Guion guardado")
     if b.button("↕️ Ordenar por hora"):
-        st.session_state[key] = sorted(items, key=lambda r: r["hora"])
+        st.session_state[key] = sorted(items, key=lambda r: (bool(str(r["hora"]).strip()), guion_texto.hora_clave(r["hora"])))
+        st.session_state[vkey] += 1
         st.rerun()
     c.download_button("📄 PDF corporativo", pdfs.guion(EMPRESA, ev, cl.get(ev["cliente_id"]), items),
                       f"guion_{ev['titulo']}.pdf", "application/pdf")
+
+
+def _uid():
+    return datetime.now().strftime("%H%M%S%f")
+
+
+def facturado_base(facturas, pid):
+    """Base imponible ya facturada de un presupuesto (las rectificativas restan)."""
+    return sum(pdfs.totales(f["lineas"], f["descuento"], 0)["imponible"]
+               for f in facturas if f.get("presupuesto_id") == pid)
+
+
+def emisor_actual():
+    return {k: EMPRESA.get(k, "") for k in ("razon_social", "nombre", "nif", "direccion", "telefono", "email", "iban")}
+
+
+def total_factura(f):
+    return pdfs.totales(f["lineas"], f["descuento"], f["iva"], f.get("retencion") or 0)["total"]
+
+
+def form_factura(draft, facturas):
+    cl, evs = clientes_map(), eventos_map()
+    uid = draft["uid"]
+    pres = db.get("presupuestos", draft["presupuesto_id"]) if draft.get("presupuesto_id") else None
+    ev = evs.get(pres["evento_id"], {}) if pres else {}
+    cid = pres["cliente_id"] if pres else None
+    st.markdown(f"### 🧾 Emitir factura · {'presupuesto ' + pres['numero'] if pres else 'manual'}")
+
+    if not pres:
+        cid = st.selectbox("Cliente guardado", [None] + list(cl), key=f"{uid}_cid",
+                           format_func=lambda i: "— Introducir los datos a mano —" if i is None else cl[i]["nombre"])
+    cli = cl.get(cid, {})
+
+    st.markdown("**Datos de facturación del cliente** — se rellenan con su ficha y puedes cambiarlos solo para esta factura")
+    c1, c2 = st.columns(2)
+    tipo = c1.radio("Tipo de cliente", ["Particular", "Empresa / autónomo"], horizontal=True, key=f"{uid}_tipo_{cid}")
+    nombre = c1.text_input("Nombre y apellidos o razón social", cli.get("nombre", ""), key=f"{uid}_nom_{cid}")
+    nif = c2.text_input("NIF / CIF" + (" (obligatorio)" if tipo != "Particular" else ""), cli.get("nif") or "", key=f"{uid}_nif_{cid}")
+    email = c2.text_input("Email", cli.get("email") or "", key=f"{uid}_mail_{cid}")
+    direccion = st.text_input("Domicilio completo (calle, CP, población, provincia)", cli.get("direccion") or "",
+                              key=f"{uid}_dir_{cid}")
+
+    if pres:
+        presu_imp = pdfs.totales(pres["lineas"], pres["descuento"], 0)["imponible"]
+        ya = facturado_base(facturas, pres["id"])
+        pendiente = round(presu_imp - ya, 2)
+        pct = st.select_slider("% del presupuesto a facturar ahora", options=list(range(10, 101, 10)),
+                               value=draft.get("pct", 100), key=f"{uid}_pct")
+        if ya:
+            st.info(f"Ya facturado: {pdfs.eur(ya)} (base imponible). Pendiente: {pdfs.eur(pendiente)}.")
+        titulo = ev.get("titulo", "")
+        if pct == 100 and not ya:
+            ini, desc0 = pres["lineas"], pres["descuento"]
+        elif pct == 100:
+            ini, desc0 = [{"concepto": f"Resto del presupuesto {pres['numero']} — {titulo}", "cantidad": 1.0,
+                           "precio": pendiente}], 0
+        else:
+            ini, desc0 = [{"concepto": f"Anticipo {pct}% del presupuesto {pres['numero']} — {titulo}",
+                           "cantidad": 1.0, "precio": round(presu_imp * pct / 100, 2)}], 0
+        iva0 = float(pres["iva"])
+    else:
+        pct, ini, desc0, iva0 = 100, [], 0, 21.0
+
+    st.markdown("**Conceptos**")
+    df = st.data_editor(lineas_df(ini), num_rows="dynamic", width="stretch", key=f"{uid}_lin_{pct}_{cid}",
+                        column_config={"precio": st.column_config.NumberColumn("Precio €", format="%.2f"),
+                                       "cantidad": st.column_config.NumberColumn("Cant.", min_value=0)})
+    d1, d2, d3 = st.columns(3)
+    f_exp = d1.date_input("Fecha de expedición", date.today(), key=f"{uid}_fe")
+    f_op = d2.date_input("Fecha de la operación (evento)",
+                         date.fromisoformat(ev["fecha"]) if ev.get("fecha") else date.today(), key=f"{uid}_fo")
+    venc = d3.date_input("Vencimiento", date.today() + timedelta(days=15), key=f"{uid}_fv")
+    e1, e2, e3 = st.columns(3)
+    desc = e1.number_input("Descuento %", 0.0, 100.0, float(desc0), key=f"{uid}_desc_{pct}")
+    iva = e2.number_input("IVA %", 0.0, 30.0, iva0, key=f"{uid}_iva")
+    ret = e3.number_input("Retención IRPF %", 0.0, 30.0, 0.0, key=f"{uid}_ret",
+                          help="Solo si facturas como autónomo a una empresa o profesional y te corresponde. Consúltalo con tu gestor.")
+    metodo = st.text_input("Forma de pago", "Transferencia bancaria", key=f"{uid}_met")
+    notas = st.text_area("Observaciones (si el IVA es 0%, indica aquí la exención o no sujeción)", key=f"{uid}_notas")
+
+    lineas = df_a_lineas(df)
+    t = pdfs.totales(lineas, desc, iva, ret)
+    st.markdown(f"**Base imponible:** {pdfs.eur(t['imponible'])} · **IVA:** {pdfs.eur(t['cuota'])}"
+                + (f" · **Retención:** -{pdfs.eur(t['ret'])}" if ret else "") + f" · **TOTAL: {pdfs.eur(t['total'])}**")
+
+    b1, b2, _ = st.columns([1, 1, 3])
+    if b2.button("Cancelar", key=f"{uid}_can"):
+        st.session_state.pop("fact_draft", None)
+        st.rerun()
+    if b1.button("✅ Emitir factura", type="primary", key=f"{uid}_ok"):
+        emisor = emisor_actual()
+        err = []
+        if not (emisor["razon_social"] or emisor["nombre"]) or not emisor["nif"] or not emisor["direccion"]:
+            err.append("Faltan datos del emisor: añade `nif` y `direccion` (y `razon_social`) en la sección [empresa] de los Secrets.")
+        if not nombre.strip() or not direccion.strip():
+            err.append("El nombre y el domicilio del cliente son obligatorios.")
+        if tipo != "Particular" and not nif.strip():
+            err.append("Para una empresa o autónomo el NIF/CIF es obligatorio.")
+        if not lineas or t["base"] <= 0:
+            err.append("Añade al menos un concepto con importe.")
+        if float(iva) == 0 and not notas.strip():
+            err.append("Con IVA 0% debes indicar el motivo legal en Observaciones.")
+        if err:
+            for e in err:
+                st.error(e)
+            return
+        num = db.siguiente_numero("facturas", "FAC")
+        db.insert("facturas", {
+            "numero": num, "presupuesto_id": pres["id"] if pres else None,
+            "evento_id": pres["evento_id"] if pres else None, "cliente_id": cid,
+            "fecha": f_exp.isoformat(), "fecha_operacion": f_op.isoformat(), "vencimiento": venc.isoformat(),
+            "lineas": lineas, "descuento": desc, "iva": iva, "retencion": ret, "estado": "Pendiente",
+            "metodo_pago": metodo, "notas": notas, "emisor": emisor,
+            "cliente_datos": {"nombre": nombre.strip(), "nif": nif.strip(), "direccion": direccion.strip(),
+                              "email": email.strip(), "telefono": cli.get("telefono") or "", "tipo": tipo}})
+        if pres and ev.get("estado") == "Confirmado" and pct == 100:
+            db.update("eventos", ev["id"], {"estado": "Realizado"})
+        st.session_state.pop("fact_draft", None)
+        st.session_state["fact_ok"] = num
+        st.rerun()
+
+
+def rectificar(f, motivo):
+    num = db.siguiente_numero("facturas", "REC")
+    db.insert("facturas", {
+        "numero": num, "presupuesto_id": f.get("presupuesto_id"), "evento_id": f.get("evento_id"),
+        "cliente_id": f.get("cliente_id"), "fecha": date.today().isoformat(),
+        "fecha_operacion": f.get("fecha_operacion"), "lineas": [{**l, "cantidad": -float(l["cantidad"])} for l in f["lineas"]],
+        "descuento": f["descuento"], "iva": f["iva"], "retencion": f.get("retencion") or 0, "estado": "Pendiente",
+        "metodo_pago": f.get("metodo_pago"), "notas": f"Motivo de la rectificación: {motivo}",
+        "emisor": f.get("emisor"), "cliente_datos": f.get("cliente_datos"), "rectifica_a": f["numero"]})
+    return num
 
 
 def pag_facturas():
     banner("Facturación")
     cl, evs = clientes_map(), eventos_map()
     fs = db.select("facturas", order="created_at", desc=True)
-    tot = [(f, pdfs.totales(f["lineas"], f["descuento"], f["iva"])["total"]) for f in fs]
-    a, b = st.columns(2)
-    a.metric("Facturado", pdfs.eur(sum(t for _, t in tot)))
-    b.metric("Pendiente de cobro", pdfs.eur(sum(t for f, t in tot if f["estado"] == "Pendiente")))
-    for f, t in tot:
-        ev, cli = evs.get(f["evento_id"], {}), cl.get(f["cliente_id"], {})
-        with st.expander(f"{f['numero']} · {cli.get('nombre', '—')} · {pdfs.eur(t)} · {f['estado']}"):
-            c1, c2 = st.columns(2)
-            est = c1.selectbox("Estado", ESTADOS_FACT, index=ESTADOS_FACT.index(f["estado"]), key=f"fe_{f['id']}")
-            met = c2.text_input("Método de pago", f.get("metodo_pago") or "", key=f"fm_{f['id']}")
-            if est != f["estado"] or met != (f.get("metodo_pago") or ""):
-                db.update("facturas", f["id"], {"estado": est, "metodo_pago": met})
+    presus = db.select("presupuestos", order="fecha")
+    if st.session_state.get("fact_ok"):
+        st.success(f"Factura {st.session_state.pop('fact_ok')} emitida. La tienes en la pestaña «Emitidas» para descargarla.")
+
+    pend_fact = []
+    for p in presus:
+        if p["estado"] != "Aceptado":
+            continue
+        imp = pdfs.totales(p["lineas"], p["descuento"], 0)["imponible"]
+        pend = round(imp - facturado_base(fs, p["id"]), 2)
+        ev = evs.get(p["evento_id"], {})
+        if pend > 0.01 and ev.get("estado") != "Cancelado":
+            pend_fact.append((p, ev, pend))
+
+    a, b, c = st.columns(3)
+    a.metric("Facturado", pdfs.eur(sum(total_factura(f) for f in fs)))
+    b.metric("Pendiente de cobro", pdfs.eur(sum(total_factura(f) for f in fs if f["estado"] == "Pendiente")))
+    c.metric("Pendiente de facturar (con IVA)", pdfs.eur(sum(pend * (1 + float(p["iva"]) / 100) for p, _, pend in pend_fact)))
+
+    if st.session_state.get("fact_draft"):
+        form_factura(st.session_state["fact_draft"], fs)
+        st.divider()
+
+    t1, t2, t3 = st.tabs(["Para facturar", "Factura manual", "Emitidas"])
+    with t1:
+        hechos = [x for x in pend_fact if x[1].get("estado") == "Realizado"]
+        st.markdown("**Presupuestos aceptados con el evento ya realizado**")
+        if not hechos:
+            st.caption("No hay nada pendiente de facturar.")
+        for p, ev, pend in hechos:
+            cli = cl.get(p["cliente_id"], {})
+            x, y = st.columns([4, 1])
+            x.write(f"**{p['numero']}** · {ev.get('titulo', '')} · {cli.get('nombre', '')} · {fmt_fecha(ev.get('fecha'))} · "
+                    f"pendiente {pdfs.eur(pend * (1 + float(p['iva']) / 100))}")
+            if y.button("🧾 Facturar", key=f"fp_{p['id']}"):
+                st.session_state["fact_draft"] = {"uid": _uid(), "presupuesto_id": p["id"], "pct": 100}
                 st.rerun()
-            pago = f"Transferencia a {EMPRESA['iban']}" if EMPRESA.get("iban") else ""
-            pdf = pdfs.documento("Factura", f["numero"], EMPRESA, cli, ev, f["lineas"], f["descuento"], f["iva"],
-                                 f["fecha"], f"Vencimiento {fmt_fecha(f['vencimiento'])}" if f.get("vencimiento") else "",
-                                 pago=pago)
-            st.download_button("📄 PDF", pdf, f"{f['numero']}.pdf", "application/pdf", key=f"fpdf_{f['id']}")
-            if st.button("🗑️ Eliminar", key=f"fdel_{f['id']}"):
-                db.delete("facturas", f["id"])
-                st.rerun()
+        otros = [x for x in pend_fact if x[1].get("estado") != "Realizado"]
+        if otros:
+            with st.expander(f"Aceptados cuyo evento aún no consta como realizado ({len(otros)})"):
+                for p, ev, pend in otros:
+                    pasado = bool(ev.get("fecha")) and ev["fecha"] < date.today().isoformat()
+                    st.write(f"**{p['numero']}** · {ev.get('titulo', '')} · {fmt_fecha(ev.get('fecha'))}" + (" · ⚠️ fecha ya pasada" if pasado else ""))
+                    x, y, _ = st.columns([1, 1, 3])
+                    if x.button("✅ Marcar realizado", key=f"rz_{p['id']}"):
+                        db.update("eventos", ev["id"], {"estado": "Realizado"})
+                        st.rerun()
+                    if y.button("💶 Facturar anticipo", key=f"ant_{p['id']}"):
+                        st.session_state["fact_draft"] = {"uid": _uid(), "presupuesto_id": p["id"], "pct": 30}
+                        st.rerun()
+        with st.expander("ℹ️ Qué debe llevar una factura en España y Verifactu"):
+            st.markdown(
+                "- Número correlativo (y serie), fecha de expedición y fecha de la operación si es distinta.\n"
+                "- Nombre o razón social, NIF y domicilio del emisor y del cliente (el NIF del cliente es obligatorio si es empresa o autónomo).\n"
+                "- Descripción de los servicios, base imponible, tipo de IVA y cuota, y total.\n"
+                "- Con IVA 0%, la mención de la exención o no sujeción.\n"
+                "- Las facturas emitidas **no se borran**: si hay un error, se emite una factura rectificativa.\n\n"
+                "Esta app genera facturas con ese contenido, pero **no implementa Verifactu** (huella, QR y registro). "
+                "Según el BOE, los programas de facturación deben cumplirlo antes del 1/1/2027 (sociedades) o 1/7/2027 (autónomos). "
+                "Consúltalo con tu gestor.")
+    with t2:
+        st.caption("Para facturar algo que no viene de un presupuesto. Puedes elegir un cliente guardado o escribir los datos.")
+        if st.button("➕ Nueva factura manual"):
+            st.session_state["fact_draft"] = {"uid": _uid(), "presupuesto_id": None}
+            st.rerun()
+    with t3:
+        rectificadas = {f.get("rectifica_a") for f in fs if f.get("rectifica_a")}
+        for f in fs:
+            ev = evs.get(f.get("evento_id"), {})
+            cli = f.get("cliente_datos") or cl.get(f.get("cliente_id"), {})
+            marca = " · rectificada" if f["numero"] in rectificadas else ""
+            with st.expander(f"{f['numero']} · {cli.get('nombre', '—')} · {pdfs.eur(total_factura(f))} · {f['estado']}{marca}"):
+                c1, c2 = st.columns(2)
+                est = c1.selectbox("Estado", ESTADOS_FACT, index=ESTADOS_FACT.index(f["estado"]), key=f"fe_{f['id']}")
+                met = c2.text_input("Forma de pago", f.get("metodo_pago") or "", key=f"fm_{f['id']}")
+                if est != f["estado"] or met != (f.get("metodo_pago") or ""):
+                    db.update("facturas", f["id"], {"estado": est, "metodo_pago": met})
+                    st.rerun()
+                emisor = f.get("emisor") or emisor_actual()
+                pago = (f.get("metodo_pago") or "Transferencia bancaria")
+                if emisor.get("iban"):
+                    pago += f"\nIBAN: {emisor['iban']}"
+                if f.get("vencimiento"):
+                    pago += f"\nVencimiento: {fmt_fecha(f['vencimiento'])}"
+                pdf = pdfs.documento("Factura rectificativa" if f.get("rectifica_a") else "Factura", f["numero"], emisor, cli, ev,
+                                     f["lineas"], f["descuento"], f["iva"], f["fecha"], pago=pago,
+                                     retencion=f.get("retencion") or 0, fecha_operacion=f.get("fecha_operacion"),
+                                     rectifica_a=f.get("rectifica_a") or "", notas=f.get("notas") or "")
+                x, y, _ = st.columns([1, 1, 2])
+                x.download_button("📄 Descargar PDF", pdf, f"{f['numero']}.pdf", "application/pdf", key=f"fpdf_{f['id']}")
+                if cli.get("email"):
+                    cuerpo = (f"Hola {cli.get('nombre', '')},\n\nTe adjunto la factura {f['numero']} por importe de "
+                              f"{pdfs.eur(total_factura(f))}.\n\nUn saludo,\n{emisor.get('razon_social') or emisor.get('nombre', '')}")
+                    y.link_button("✉️ Preparar email", f"mailto:{cli['email']}?subject={urllib.parse.quote('Factura ' + f['numero'])}"
+                                                      f"&body={urllib.parse.quote(cuerpo)}")
+                    st.caption("Descarga el PDF y adjúntalo al correo (el enlace no puede adjuntarlo solo).")
+                if not f.get("rectifica_a") and f["numero"] not in rectificadas:
+                    motivo = st.text_input("Motivo para rectificar esta factura", key=f"mot_{f['id']}")
+                    if st.button("↩️ Emitir factura rectificativa (anula esta factura)", key=f"rec_{f['id']}"):
+                        if motivo.strip():
+                            num = rectificar(f, motivo.strip())
+                            st.session_state["fact_ok"] = num
+                            st.rerun()
+                        else:
+                            st.error("Indica el motivo de la rectificación.")
+                if st.secrets.get("MODO_PRUEBAS") and st.button("🗑️ Borrar (solo modo pruebas)", key=f"fdel_{f['id']}"):
+                    db.delete("facturas", f["id"])
+                    st.rerun()
 
 
 # ---------- navegación ----------
 login()
 css()
-PAGINAS = {"🏠 Panel": pag_panel, "📅 Agenda": pag_agenda, "🎉 Eventos": pag_eventos, "👥 Clientes": pag_clientes,
-           "💶 Presupuestos": pag_presupuestos, "📝 Guiones": pag_guiones, "🧾 Facturación": pag_facturas,
-           "🎛️ Servicios": pag_servicios}
+PAGINAS = {
+    "🏠 Panel": pag_panel,
+    "1️⃣ Clientes": pag_clientes,
+    "2️⃣ Eventos": pag_eventos,
+    "3️⃣ Presupuestos": pag_presupuestos,
+    "4️⃣ Guiones": pag_guiones,
+    "5️⃣ Facturación": pag_facturas,
+    "📅 Agenda": pag_agenda,
+    "🎛️ Servicios y tarifas": pag_servicios,
+}
 with st.sidebar:
     try:
         st.image("assets/logo.png", width=140)

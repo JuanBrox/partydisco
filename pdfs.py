@@ -44,12 +44,14 @@ def p(txt, style="n"):
     return Paragraph(escape(str(txt or "")).replace("\n", "<br/>"), ST[style])
 
 
-def totales(lineas, descuento=0, iva=21):
+def totales(lineas, descuento=0, iva=21, retencion=0):
     base = sum(float(l.get("cantidad") or 0) * float(l.get("precio") or 0) for l in lineas)
     desc = base * float(descuento or 0) / 100
     imponible = base - desc
     cuota = imponible * float(iva or 0) / 100
-    return {"base": base, "desc": desc, "imponible": imponible, "cuota": cuota, "total": imponible + cuota}
+    ret = imponible * float(retencion or 0) / 100
+    return {"base": base, "desc": desc, "imponible": imponible, "cuota": cuota, "ret": ret,
+            "total": imponible + cuota - ret}
 
 
 def _footer(empresa):
@@ -70,7 +72,7 @@ def _header(empresa, titulo, sub):
         logo = Image(LOGO, 28 * mm, 28 * mm)
     else:
         logo = Paragraph(f"<b>{escape(empresa['nombre'])}</b>", ST["b"])
-    t = Table([[logo, [Paragraph(escape(titulo), ST["h1"]), Paragraph(escape(sub), ST["sub"])]]],
+    t = Table([[logo, [Paragraph(escape(titulo), ST["h1"]), Paragraph(escape(sub).replace("\n", "<br/>"), ST["sub"])]]],
               colWidths=[40 * mm, 134 * mm])
     t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (0, 0), 0)]))
     band = Table([["", ""]], colWidths=[87 * mm, 87 * mm], rowHeights=[3 * mm])
@@ -88,7 +90,10 @@ def _build(story, empresa, titulo):
 
 
 def _partes(empresa, cliente):
-    e = [f"<b>{escape(empresa['nombre'])}</b>"]
+    rs = empresa.get("razon_social") or empresa["nombre"]
+    e = [f"<b>{escape(rs)}</b>"]
+    if rs != empresa["nombre"]:
+        e.append(f"({escape(empresa['nombre'])})")
     for k, lab in (("nif", "NIF"), ("direccion", ""), ("telefono", "Tel."), ("email", "")):
         if empresa.get(k):
             e.append(f"{lab + ': ' if lab else ''}{escape(empresa[k])}")
@@ -107,10 +112,21 @@ def _partes(empresa, cliente):
 
 
 def documento(tipo, numero, empresa, cliente, evento, lineas, descuento, iva, fecha_doc,
-              nota_fecha="", condiciones="", pago=""):
-    sub = f"Fecha: {fdate(fecha_doc)}" + (f"  ·  {nota_fecha}" if nota_fecha else "")
+              nota_fecha="", condiciones="", pago="", retencion=0, fecha_operacion=None,
+              rectifica_a="", notas=""):
+    es_factura = tipo.lower().startswith("factura")
+    if es_factura:
+        sub = f"Fecha de expedición: {fdate(fecha_doc)}"
+        if fecha_operacion:
+            sub += f"\nFecha de la operación: {fdate(fecha_operacion)}"
+        if nota_fecha:
+            sub += f"\n{nota_fecha}"
+    else:
+        sub = f"Fecha: {fdate(fecha_doc)}" + (f"  ·  {nota_fecha}" if nota_fecha else "")
     s = _header(empresa, f"{tipo} {numero}", sub)
     s += [_partes(empresa, cliente), Spacer(1, 8)]
+    if rectifica_a:
+        s += [Paragraph(f"<b>Esta factura rectifica la factura nº {escape(rectifica_a)}.</b>", ST["n"]), Spacer(1, 6)]
     if evento:
         det = f"<b>Evento:</b> {escape(evento.get('titulo') or '')}"
         if evento.get("fecha"):
@@ -136,12 +152,15 @@ def documento(tipo, numero, empresa, cliente, evento, lineas, descuento, iva, fe
     ]))
     s += [t, Spacer(1, 8)]
 
-    tt = totales(lineas, descuento, iva)
+    tt = totales(lineas, descuento, iva, retencion)
     filas = [["Base", eur(tt["base"])]]
     if float(descuento or 0) > 0:
-        filas.append([f"Descuento {float(descuento):g}%", "-" + eur(tt["desc"])])
-        filas.append(["Base imponible", eur(tt["imponible"])])
-    filas += [[f"IVA {float(iva or 0):g}%", eur(tt["cuota"])], ["TOTAL", eur(tt["total"])]]
+        filas.append([f"Descuento {float(descuento):g}%", eur(-tt["desc"])])
+    filas.append(["Base imponible", eur(tt["imponible"])])
+    filas.append([f"IVA {float(iva or 0):g}%", eur(tt["cuota"])])
+    if float(retencion or 0) > 0:
+        filas.append([f"Retención IRPF {float(retencion):g}%", eur(-tt["ret"])])
+    filas.append(["TOTAL", eur(tt["total"])])
     tot = Table(filas, colWidths=[45 * mm, 32 * mm], hAlign="RIGHT")
     tot.setStyle(TableStyle([
         ("ALIGN", (1, 0), (1, -1), "RIGHT"), ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -152,12 +171,17 @@ def documento(tipo, numero, empresa, cliente, evento, lineas, descuento, iva, fe
     s.append(tot)
     if pago:
         s += [Paragraph("Forma de pago", ST["h2"]), p(pago)]
+    if notas:
+        s += [Paragraph("Observaciones", ST["h2"]), p(notas, "small")]
     if condiciones:
         s += [Paragraph("Condiciones", ST["h2"]), p(condiciones, "small")]
     return _build(s, empresa, f"{tipo} {numero}")
 
 
 def guion(empresa, evento, cliente, items):
+    generales = [i for i in items if not str(i.get("hora") or "").strip()
+                 and str(i.get("momento") or "").lower().startswith("indicaciones")]
+    items = [i for i in items if i not in generales]
     s = _header(empresa, "Guion del evento", evento.get("titulo") or "")
     info = [f"<b>Fecha:</b> {fdate(evento.get('fecha'))}"]
     if evento.get("hora_inicio"):
@@ -172,11 +196,19 @@ def guion(empresa, evento, cliente, items):
     box.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), SOFT), ("LEFTPADDING", (0, 0), (-1, -1), 8),
                              ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
     s += [box, Spacer(1, 10)]
+    if generales:
+        txt = "<br/>".join(escape(str(g.get("detalle") or "")).replace("\n", "<br/>") for g in generales)
+        gb = Table([[Paragraph("<b>Indicaciones generales</b><br/>" + txt, ST["n"])]], colWidths=[174 * mm])
+        gb.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.8, SKY), ("LINEBEFORE", (0, 0), (0, -1), 3, NAVY),
+                                ("LEFTPADDING", (0, 0), (-1, -1), 10), ("TOPPADDING", (0, 0), (-1, -1), 7),
+                                ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
+        s += [gb, Spacer(1, 10)]
     rows = [[Paragraph(h, ST["th"]) for h in ("Hora", "Momento", "Detalle", "Música / notas")]]
     for it in items:
-        rows.append([p(it.get("hora")), Paragraph(f"<b>{escape(str(it.get('momento') or ''))}</b>", ST["n"]),
+        rows.append([Paragraph(f"<b>{escape(str(it.get('hora') or ''))}</b>", ST["b"]),
+                     Paragraph(f"<b>{escape(str(it.get('momento') or ''))}</b>", ST["n"]),
                      p(it.get("detalle")), p(it.get("musica"))])
-    t = Table(rows, colWidths=[18 * mm, 42 * mm, 60 * mm, 54 * mm], repeatRows=1)
+    t = Table(rows, colWidths=[24 * mm, 38 * mm, 58 * mm, 54 * mm], repeatRows=1)
     t.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), NAVY), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, SOFT]),
         ("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 5),
