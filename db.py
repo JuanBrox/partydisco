@@ -5,7 +5,15 @@ from supabase import create_client
 
 @st.cache_resource
 def _client():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    faltan = [k for k in ("SUPABASE_URL", "SUPABASE_KEY") if k not in st.secrets]
+    if faltan:
+        st.error(f"Faltan en Secrets: {', '.join(faltan)} (deben ir antes de [empresa]).")
+        st.stop()
+    url = st.secrets["SUPABASE_URL"].strip().rstrip("/")
+    if not (url.startswith("https://") and url.endswith(".supabase.co")):
+        st.error(f"SUPABASE_URL no parece una Project URL válida: {url}")
+        st.stop()
+    return create_client(url, st.secrets["SUPABASE_KEY"].strip())
 
 
 def select(table, order=None, desc=False, **eq):
@@ -14,7 +22,11 @@ def select(table, order=None, desc=False, **eq):
         q = q.eq(k, v)
     if order:
         q = q.order(order, desc=desc)
-    return q.execute().data
+    data = q.execute().data
+    if not isinstance(data, list):
+        st.error(f"Supabase devolvió algo inesperado en '{table}': {str(data)[:300]}")
+        st.stop()
+    return data
 
 
 def get(table, id_):
